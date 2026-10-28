@@ -6,6 +6,7 @@ from litellm import acompletion, completion
 
 from core.base.abstractions import GenerationConfig
 from core.base.providers.llm import CompletionConfig, CompletionProvider
+from core.base.usage import capture_usage
 
 logger = logging.getLogger()
 
@@ -46,6 +47,7 @@ class LiteLLMCompletionProvider(CompletionProvider):
         return args
 
     async def _execute_task(self, task: dict[str, Any]):
+        """Capture attributed completion usage before response validation."""
         messages = task["messages"]
         generation_config = task["generation_config"]
         kwargs = task["kwargs"]
@@ -58,9 +60,20 @@ class LiteLLMCompletionProvider(CompletionProvider):
             f"Executing LiteLLM task with generation_config={generation_config}"
         )
 
-        return await self.acompletion(**args)
+        with capture_usage(
+            self.config.app.usage_receipts_directory
+            if self.config.app
+            else None,
+            args.get("model"),
+        ) as call:
+            if call.recording:
+                args["num_retries"] = 0
+                args["max_retries"] = 0
+            call.response = await self.acompletion(**args)
+            return call.response
 
     def _execute_task_sync(self, task: dict[str, Any]):
+        """Capture usage for a synchronous attributed completion attempt."""
         messages = task["messages"]
         generation_config = task["generation_config"]
         kwargs = task["kwargs"]
@@ -74,7 +87,17 @@ class LiteLLMCompletionProvider(CompletionProvider):
         )
 
         try:
-            return self.completion(**args)
+            with capture_usage(
+                self.config.app.usage_receipts_directory
+                if self.config.app
+                else None,
+                args.get("model"),
+            ) as call:
+                if call.recording:
+                    args["num_retries"] = 0
+                    args["max_retries"] = 0
+                call.response = self.completion(**args)
+                return call.response
         except Exception as e:
             logger.error(f"Sync LiteLLM task execution failed: {str(e)}")
             raise

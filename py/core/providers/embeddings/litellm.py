@@ -16,10 +16,12 @@ from core.base import (
     EmbeddingProvider,
     R2RException,
 )
+from core.base.usage import capture_usage
 
 from .utils import truncate_texts_to_token_limit
 
 logger = logging.getLogger()
+_NO_SDK_RETRIES = -1
 
 
 class LiteLLMEmbeddingProvider(EmbeddingProvider):
@@ -73,6 +75,7 @@ class LiteLLMEmbeddingProvider(EmbeddingProvider):
         return embedding_kwargs
 
     async def _execute_task(self, task: dict[str, Any]) -> list[list[float]]:
+        """Call the embedding provider and record usage before extracting vectors."""
         texts = task["texts"]
         kwargs = self._get_embedding_kwargs(**task.get("kwargs", {}))
 
@@ -88,10 +91,20 @@ class LiteLLMEmbeddingProvider(EmbeddingProvider):
                         texts, kwargs["model"]
                     )
 
-            response = await self.litellm_aembedding(
-                input=texts,
-                **kwargs,
-            )
+            with capture_usage(
+                self.config.app.usage_receipts_directory
+                if self.config.app
+                else None,
+                kwargs.get("model"),
+            ) as call:
+                if call.recording:
+                    kwargs["num_retries"] = 0
+                    # shortcut: LiteLLM 1.69.3 replaces zero with its default; use -1 until it honors zero.
+                    kwargs["max_retries"] = _NO_SDK_RETRIES
+                response = call.response = await self.litellm_aembedding(
+                    input=texts,
+                    **kwargs,
+                )
             return [data["embedding"] for data in response.data]
         except AuthenticationError:
             logger.error(
@@ -105,6 +118,7 @@ class LiteLLMEmbeddingProvider(EmbeddingProvider):
             raise R2RException(error_msg, 400) from e
 
     def _execute_task_sync(self, task: dict[str, Any]) -> list[list[float]]:
+        """Record synchronous embedding usage before returning vectors."""
         texts = task["texts"]
         kwargs = self._get_embedding_kwargs(**task.get("kwargs", {}))
         try:
@@ -115,10 +129,19 @@ class LiteLLMEmbeddingProvider(EmbeddingProvider):
                         texts, kwargs["model"]
                     )
 
-            response = self.litellm_embedding(
-                input=texts,
-                **kwargs,
-            )
+            with capture_usage(
+                self.config.app.usage_receipts_directory
+                if self.config.app
+                else None,
+                kwargs.get("model"),
+            ) as call:
+                if call.recording:
+                    kwargs["num_retries"] = 0
+                    kwargs["max_retries"] = _NO_SDK_RETRIES
+                response = call.response = self.litellm_embedding(
+                    input=texts,
+                    **kwargs,
+                )
             return [data["embedding"] for data in response.data]
         except AuthenticationError:
             logger.error(

@@ -30,6 +30,9 @@ R2R also includes a **Deep Research API**, a multi-step reasoning system that fe
 
 # Usage
 
+This fork supports opt-in [ingestion usage receipts](USAGE_RECEIPTS.md) for
+document-attributed LiteLLM token accounting.
+
 ```python
 # Basic search
 results = client.retrieval.search(query="What is DeepSeek R1?")

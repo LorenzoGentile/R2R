@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional, Type
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class InnerConfig(BaseModel, ABC):
@@ -30,7 +30,10 @@ class InnerConfig(BaseModel, ABC):
 
 
 class AppConfig(InnerConfig):
+    """Configure settings shared by application providers."""
+
     project_name: Optional[str] = None
+    usage_receipts_directory: Optional[str] = Field(default=None, min_length=1)
     user_tools_path: Optional[str] = None
     default_max_documents_per_user: Optional[int] = 100
     default_max_chunks_per_user: Optional[int] = 10_000
