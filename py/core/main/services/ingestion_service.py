@@ -2,8 +2,9 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from itertools import groupby
 from typing import Any, AsyncGenerator, Optional, Sequence
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 
@@ -30,6 +31,7 @@ from core.base.abstractions import (
     VectorTableName,
 )
 from core.base.api.models import User
+from core.base.usage import UsageContext, UsageOperation, usage_context
 from shared.abstractions import PDFParsingError, PopplerNotFoundError
 
 from ..abstractions import R2RProviders
@@ -285,6 +287,7 @@ class IngestionService:
         document_info: DocumentResponse,
         chunked_documents: list[dict],
     ) -> None:
+        """Generate a document summary and its embedding with usage attribution."""
         if not self.config.ingestion.skip_document_summary:
             document = f"Document Title: {document_info.title}\n"
             if document_info.metadata != {}:
@@ -306,22 +309,34 @@ class IngestionService:
                 },
             )
 
-            response = await self.providers.llm.aget_completion(
-                messages=messages,
-                generation_config=GenerationConfig(
-                    model=self.config.ingestion.document_summary_model
-                    or self.config.app.fast_llm
-                ),
+            attribution = UsageContext(
+                document_id=document_info.id,
+                owner_id=document_info.owner_id,
+                collection_ids=tuple(document_info.collection_ids),
+                operation=UsageOperation.DOCUMENT_SUMMARY,
             )
+            with usage_context(attribution):
+                response = await self.providers.llm.aget_completion(
+                    messages=messages,
+                    generation_config=GenerationConfig(
+                        model=self.config.ingestion.document_summary_model
+                        or self.config.app.fast_llm
+                    ),
+                )
 
             document_info.summary = response.choices[0].message.content  # type: ignore
 
             if not document_info.summary:
                 raise ValueError("Expected a generated response.")
 
-            embedding = await self.providers.embedding.async_get_embedding(
-                text=document_info.summary,
-            )
+            with usage_context(
+                attribution.model_copy(
+                    update={"operation": UsageOperation.SUMMARY_EMBEDDING}
+                )
+            ):
+                embedding = await self.providers.embedding.async_get_embedding(
+                    text=document_info.summary,
+                )
             document_info.summary_embedding = embedding
         return
 
@@ -342,23 +357,46 @@ class IngestionService:
         )
         extraction_batch: list[DocumentChunk] = []
         tasks: set[asyncio.Task] = set()
+        execution_id = uuid4()
 
         async def process_batch(
             batch: list[DocumentChunk],
         ) -> list[VectorEntry]:
-            # All text from the batch
-            texts = [
-                (
+            """Embed batches without sharing a receipt across document owners."""
+            vectors = []
+            for identity, group in groupby(
+                batch,
+                key=lambda chunk: (
+                    chunk.document_id,
+                    chunk.owner_id,
+                    tuple(chunk.collection_ids),
+                ),
+            ):
+                texts = [
                     ex.data.decode("utf-8")
                     if isinstance(ex.data, bytes)
                     else ex.data
-                )
-                for ex in batch
-            ]
-            # Retrieve embeddings in bulk
-            vectors = await self.providers.embedding.async_get_embeddings(
-                texts,  # list of strings
-            )
+                    for ex in group
+                ]
+                with usage_context(
+                    UsageContext(
+                        execution_id=execution_id,
+                        document_id=identity[0],
+                        owner_id=identity[1],
+                        collection_ids=identity[2],
+                        operation=UsageOperation.CHUNK_EMBEDDING,
+                    )
+                ):
+                    group_vectors = (
+                        await self.providers.embedding.async_get_embeddings(
+                            texts
+                        )
+                    )
+                    if len(group_vectors) != len(texts):
+                        raise ValueError(
+                            "Embedding count does not match input count"
+                        )
+                    vectors.extend(group_vectors)
             # Zip them back together
             results = []
             for raw_vector, extraction in zip(vectors, batch, strict=False):
@@ -380,6 +418,7 @@ class IngestionService:
             return results
 
         async def run_process_batch(batch: list[DocumentChunk]):
+            """Run one bounded batch of attributed embeddings."""
             return await process_batch(batch)
 
         # Convert each chunk dict to a DocumentChunk
@@ -707,37 +746,47 @@ class IngestionService:
                 ),
             )
         ]
+        attribution = UsageContext(
+            document_id=document_id,
+            owner_id=chunk["owner_id"],
+            collection_ids=tuple(chunk["collection_ids"]),
+            operation=UsageOperation.CHUNK_ENRICHMENT,
+        )
         try:
-            # Obtain the updated text from the LLM
-            updated_chunk_text = (
-                (
-                    await self.providers.llm.aget_completion(
-                        messages=await self.providers.database.prompts_handler.get_message_payload(
-                            task_prompt_name=chunk_enrichment_settings.chunk_enrichment_prompt,
-                            task_inputs={
-                                "document_summary": document_summary or "None",
-                                "chunk": chunk["text"],
-                                "preceding_chunks": (
-                                    "\n".join(preceding_chunks)
-                                    if preceding_chunks
-                                    else "None"
-                                ),
-                                "succeeding_chunks": (
-                                    "\n".join(succeeding_chunks)
-                                    if succeeding_chunks
-                                    else "None"
-                                ),
-                                "chunk_size": self.config.ingestion.chunk_size
-                                or 1024,
-                            },
-                        ),
-                        generation_config=chunk_enrichment_settings.generation_config
-                        or GenerationConfig(model=self.config.app.fast_llm),
+            with usage_context(attribution):
+                # Obtain the updated text from the LLM
+                updated_chunk_text = (
+                    (
+                        await self.providers.llm.aget_completion(
+                            messages=await self.providers.database.prompts_handler.get_message_payload(
+                                task_prompt_name=chunk_enrichment_settings.chunk_enrichment_prompt,
+                                task_inputs={
+                                    "document_summary": document_summary
+                                    or "None",
+                                    "chunk": chunk["text"],
+                                    "preceding_chunks": (
+                                        "\n".join(preceding_chunks)
+                                        if preceding_chunks
+                                        else "None"
+                                    ),
+                                    "succeeding_chunks": (
+                                        "\n".join(succeeding_chunks)
+                                        if succeeding_chunks
+                                        else "None"
+                                    ),
+                                    "chunk_size": self.config.ingestion.chunk_size
+                                    or 1024,
+                                },
+                            ),
+                            generation_config=chunk_enrichment_settings.generation_config
+                            or GenerationConfig(
+                                model=self.config.app.fast_llm
+                            ),
+                        )
                     )
+                    .choices[0]
+                    .message.content
                 )
-                .choices[0]
-                .message.content
-            )
         except Exception:
             updated_chunk_text = chunk["text"]
             chunk["metadata"]["chunk_enrichment_status"] = "failed"
@@ -751,9 +800,14 @@ class IngestionService:
             chunk["metadata"]["chunk_enrichment_status"] = "failed"
 
         # Re-embed
-        data = await self.providers.embedding.async_get_embedding(
-            updated_chunk_text
-        )
+        with usage_context(
+            attribution.model_copy(
+                update={"operation": UsageOperation.ENRICHMENT_EMBEDDING}
+            )
+        ):
+            data = await self.providers.embedding.async_get_embedding(
+                updated_chunk_text
+            )
         chunk["metadata"]["original_text"] = chunk["text"]
 
         return VectorEntry(
