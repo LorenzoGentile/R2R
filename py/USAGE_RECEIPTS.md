@@ -67,7 +67,8 @@ Every completed provider attempt publishes one `<event_id>.json` file containing
 - an `execution_id` grouping one service-stage invocation and its retries;
 - the adapter, available provider identity, requested and returned model names,
   and available response ID;
-- whether the provider call failed, the usage source and counter status;
+- whether the provider call failed, the usage source, counter status and
+  `usage_complete` flag;
 - nullable input, output, cache-read and cache-write token counts.
 
 A summary and its embedding share a stage execution ID. Chunk embedding batches
@@ -95,6 +96,14 @@ treating these receipts as authoritative billing data. Returned model/provider
 identity can be absent; the requested model is retained separately, without
 claiming it was the actual model served.
 
+`usage_complete` is true only for observed, raw provider counters with both input
+and output known; normalized SDK routes remain incomplete pending qualification.
+Embedding operations normalize missing output to zero when input is observed,
+because embeddings do not generate output tokens; missing input stays unknown.
+Explicit zero input is still observed usage. Generation requires both counters.
+Call failure and counter completeness are independent: preserve any observed
+usage even when an attempt or downstream document processing fails.
+
 No text, vectors, arbitrary metadata, credentials, endpoint URLs or provider
 error bodies are written. Workspace/Project identity is deliberately absent:
 an importer must resolve the document against its own trusted ownership records.
@@ -109,6 +118,16 @@ directory is fsynced too. Import only `*.json`, validate the schema, and enforce
 unique constraint on `event_id` in your ledger. Replaying a file must not charge
 it again. Archive/remove receipts only after the importer commits its ledger
 transaction. R2R never deletes receipts or reruns model work to replay them.
+
+A host-wide ledger can namespace `event_id` by producer and trusted tenant as its
+external event key, without creating conversation or message records. Map
+`occurred_at`, operation, provider/response identity, `tokens.input_tokens`,
+`tokens.output_tokens`, the two cache subsets and `usage_complete` to ledger
+fields; preserve `context.execution_id` for stage correlation, not deduplication.
+The importer owns tenant attribution and pricing, and can retain known partial
+cost while reporting missing or unpriced usage separately. Complete counters do
+not guarantee a known price. Source (L1) and wiki (L2) ingestion must be classified
+from trusted document mappings to avoid charging the same receipt to both.
 
 Receipt failures emit a `CRITICAL` accounting-gap log containing the event ID,
 exception type and available system error code (for example, `ENOSPC` or

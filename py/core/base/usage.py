@@ -106,7 +106,30 @@ class UsageReceipt(BaseModel):
     call_failed: bool = False
     usage_status: UsageStatus = UsageStatus.MISSING
     usage_source: UsageSource = UsageSource.LITELLM
+    usage_complete: bool = False
     tokens: UsageTokens = Field(default_factory=UsageTokens)
+
+    @model_validator(mode="after")
+    def finalize_usage(self) -> "UsageReceipt":
+        """Derive embedding output and completeness from qualified counters."""
+        if (
+            self.context.operation
+            in (
+                UsageOperation.SUMMARY_EMBEDDING,
+                UsageOperation.CHUNK_EMBEDDING,
+                UsageOperation.ENRICHMENT_EMBEDDING,
+            )
+            and self.tokens.input_tokens is not None
+            and self.tokens.output_tokens is None
+        ):
+            self.tokens.output_tokens = 0
+        self.usage_complete = (
+            self.usage_status == UsageStatus.OBSERVED
+            and self.usage_source == UsageSource.PROVIDER_RESPONSE
+            and self.tokens.input_tokens is not None
+            and self.tokens.output_tokens is not None
+        )
+        return self
 
 
 class UsageCall(BaseModel):
@@ -187,6 +210,7 @@ def capture_usage(
                 receipt.usage_status = call.raw_usage_status
                 receipt.usage_source = UsageSource.PROVIDER_RESPONSE
                 receipt.tokens = call.raw_tokens or UsageTokens()
+            receipt.finalize_usage()
             _publish_receipt(Path(directory), receipt)
         except Exception as exc:
             # Accounting failure must not retry an already paid model call.

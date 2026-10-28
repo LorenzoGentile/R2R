@@ -433,6 +433,7 @@ async def test_cancellation_records_gap_and_resets_context(context, tmp_path):
     (event,) = receipts(tmp_path)
     assert event.call_failed
     assert event.usage_status == UsageStatus.MISSING
+    assert event.usage_complete is False
 
 
 async def test_enrichment_and_reembedding_are_attributed(
@@ -465,6 +466,7 @@ def test_invalid_usage_is_not_coerced_or_priced(raw, context, tmp_path):
         call.response = {"usage": {"prompt_tokens": raw}}
     (event,) = receipts(tmp_path)
     assert event.usage_status == UsageStatus.INVALID
+    assert event.usage_complete is False
     assert event.tokens.input_tokens is None
 
 
@@ -477,6 +479,7 @@ def test_missing_usage_is_unknown(response, context, tmp_path):
         call.response = response
     (event,) = receipts(tmp_path)
     assert event.usage_status == UsageStatus.MISSING
+    assert event.usage_complete is False
     assert event.tokens.input_tokens is None
 
 
@@ -496,6 +499,9 @@ def test_anthropic_cache_subsets_are_not_added_twice(context, tmp_path):
     ):
         call.response = response
     (event,) = receipts(tmp_path)
+    assert (
+        event.usage_complete is False
+    )  # This normalized SDK route is not qualified.
     assert event.tokens.model_dump() == {
         "input_tokens": 100,
         "output_tokens": 10,
@@ -603,14 +609,18 @@ async def test_real_litellm_http_embedding(
     assert result == [0.1, 0.2]
     (event,) = receipts(tmp_path)
     assert event.tokens.input_tokens == expected
-    assert event.tokens.output_tokens is None
+    assert event.tokens.output_tokens == (0 if expected is not None else None)
+    assert event.usage_complete is (expected is not None)
     assert event.usage_status == status
     assert event.usage_source == UsageSource.PROVIDER_RESPONSE
     assert event.response_model == "text-embedding-3-small"
     await asyncio.sleep(0.05)
 
 
-async def test_real_litellm_http_summary_retry(providers, context, tmp_path):
+@pytest.mark.parametrize("output_tokens", [6, 0, None])
+async def test_real_litellm_http_summary_retry(
+    providers, context, tmp_path, output_tokens
+):
     """Observe R2R retries separately with the real LiteLLM/OpenAI adapters."""
     import litellm
 
@@ -641,8 +651,12 @@ async def test_real_litellm_http_summary_retry(providers, context, tmp_path):
                 ],
                 "usage": {
                     "prompt_tokens": 32,
-                    "completion_tokens": 6,
-                    "total_tokens": 38,
+                    **(
+                        {"completion_tokens": output_tokens}
+                        if output_tokens is not None
+                        else {}
+                    ),
+                    "total_tokens": 32 + (output_tokens or 0),
                     "prompt_tokens_details": {"cached_tokens": 8},
                 },
             },
@@ -657,7 +671,11 @@ async def test_real_litellm_http_summary_retry(providers, context, tmp_path):
             base_url="https://fixture.invalid/v1",
         )
         providers.llm.acompletion = litellm.acompletion
-        with usage_context(context):
+        with usage_context(
+            context.model_copy(
+                update={"operation": UsageOperation.DOCUMENT_SUMMARY}
+            )
+        ):
             response = await providers.llm.aget_completion(
                 messages=[{"role": "user", "content": "summarize"}],
                 generation_config=GenerationConfig(model="openai/gpt-4o-mini"),
@@ -671,10 +689,15 @@ async def test_real_litellm_http_summary_retry(providers, context, tmp_path):
     assert sum(e.call_failed for e in events) == 1
     observed = next(e for e in events if not e.call_failed)
     assert observed.tokens.input_tokens == 32
-    assert observed.tokens.output_tokens == 6
+    assert observed.tokens.output_tokens == output_tokens
     assert observed.tokens.cache_read_input_tokens == 8
     assert observed.response_id == "chatcmpl-fixture"
     assert observed.provider == "openai"
+    assert observed.usage_complete is (output_tokens is not None)
+    published = json.loads(
+        (tmp_path / f"{observed.event_id}.json").read_text()
+    )
+    assert published["usage_complete"] is (output_tokens is not None)
     assert existing_logger.call_count > 0
     await asyncio.sleep(0.05)
 
