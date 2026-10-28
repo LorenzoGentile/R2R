@@ -110,8 +110,11 @@ unique constraint on `event_id` in your ledger. Replaying a file must not charge
 it again. Archive/remove receipts only after the importer commits its ledger
 transaction. R2R never deletes receipts or reruns model work to replay them.
 
-Receipt write failures emit a `CRITICAL` accounting-gap log containing the event
-ID. They do not fail or retry an already paid model call. Monitor these logs,
+Receipt failures emit a `CRITICAL` accounting-gap log containing the event ID,
+exception type and available system error code (for example, `ENOSPC` or
+`EACCES`). Exception messages and chains are omitted because they can contain
+provider response bodies. These failures do not fail or retry an already paid
+model call. Monitor these logs,
 `missing`/`invalid` receipts, storage capacity and importer backlog. A disk failure,
 process kill before publication, or a provider charge whose response never
 arrives cannot be reconstructed from these files. This is not exact invoice

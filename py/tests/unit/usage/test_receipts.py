@@ -1,6 +1,7 @@
 """Exercise ingestion accounting through real providers with simulated model I/O."""
 
 import asyncio
+import errno
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -386,19 +387,40 @@ async def test_failed_accounting_does_not_retry_model(
     assert blocked.read_text() == "existing file"
 
 
+@pytest.mark.parametrize("error_number", [errno.ENOSPC, errno.EACCES, None])
 def test_atomic_publication_failure_leaves_no_partial_receipt(
-    context, tmp_path, monkeypatch, caplog
+    context, tmp_path, monkeypatch, caplog, error_number
 ):
     """Do not expose incomplete JSON if flushing the temporary file fails."""
     from core.base import usage
 
-    monkeypatch.setattr(
-        usage.os, "fsync", Mock(side_effect=OSError("disk failure"))
-    )
+    error = OSError(error_number, "private provider response")
+    error.__cause__ = RuntimeError("private chained response")
+    monkeypatch.setattr(usage.os, "fsync", Mock(side_effect=error))
     with usage_context(context), capture_usage(str(tmp_path), "model") as call:
         call.response = {"usage": {"prompt_tokens": 2}}
     assert not list(tmp_path.iterdir())
     assert "accounting gap" in caplog.text
+    assert f"exception={type(error).__name__}" in caplog.text
+    assert f"errno={errno.errorcode.get(error_number)}" in caplog.text
+    assert "private" not in caplog.text
+
+
+def test_response_read_failure_logs_type_without_provider_body(
+    context, tmp_path, monkeypatch, caplog
+):
+    """Diagnose response-read errors without exposing exception messages or chains."""
+    from core.base import usage
+
+    error = RuntimeError("private provider response")
+    error.__cause__ = ValueError("private chained response")
+    monkeypatch.setattr(usage, "_populate_receipt", Mock(side_effect=error))
+    with usage_context(context), capture_usage(str(tmp_path), "model"):
+        pass
+    assert "accounting gap" in caplog.text
+    assert "exception=RuntimeError" in caplog.text
+    assert "private" not in caplog.text
+    assert receipts(tmp_path) == []
 
 
 async def test_cancellation_records_gap_and_resets_context(context, tmp_path):

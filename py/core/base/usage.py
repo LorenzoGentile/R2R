@@ -1,5 +1,6 @@
 """Opt-in, content-free receipts for attributed LiteLLM ingestion calls."""
 
+import errno
 import logging
 import os
 from contextlib import contextmanager
@@ -187,11 +188,17 @@ def capture_usage(
                 receipt.usage_source = UsageSource.PROVIDER_RESPONSE
                 receipt.tokens = call.raw_tokens or UsageTokens()
             _publish_receipt(Path(directory), receipt)
-        except Exception:
+        except Exception as exc:
             # Accounting failure must not retry an already paid model call.
+            # Exception messages and chains can contain provider response bodies.
             _logger.critical(
-                "Usage receipt persistence failed; accounting gap for event %s",
+                "Usage receipt persistence failed; accounting gap for event %s; "
+                "exception=%s; errno=%s",
                 receipt.event_id,
+                type(exc).__name__,
+                errno.errorcode.get(exc.errno, exc.errno)
+                if isinstance(exc, OSError) and exc.errno is not None
+                else None,
             )
 
 
