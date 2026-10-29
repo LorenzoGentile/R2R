@@ -163,7 +163,7 @@ environment to that version. This change does not refresh unrelated dependencies
 ## Fork deployment artifact
 
 `py/Dockerfile.receipts` overlays this maintenance branch on the immutable official
-3.6.5 multi-platform base and pins LiteLLM to the qualified `1.69.3` adapter.
+3.6.5 multi-platform base and pins LiteLLM to `1.69.3` and OpenAI to `1.70.0`, the qualified retry adapter pair.
 Pushing a `usage-v*` release tag runs `publish-usage-receipts.yml`: native AMD64 and
 ARM64 builds each run the receipt tests (including async retry/provider HTTP
 cases) before upload to GHCR. Only successful architectures enter the release
