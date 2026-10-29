@@ -159,3 +159,14 @@ The repository's pre-existing `uv.lock` pins LiteLLM 1.64.1, older than the
 `pyproject.toml` minimum of 1.69.3. Validation for this change uses LiteLLM 1.69.3
 and Python 3.12; when using `uv sync --frozen`, update LiteLLM in the test
 environment to that version. This change does not refresh unrelated dependencies.
+
+## Fork deployment artifact
+
+`py/Dockerfile.receipts` overlays this maintenance branch on the immutable official
+3.6.5 multi-platform base and pins LiteLLM to the qualified `1.69.3` adapter.
+Pushing a `usage-v*` release tag runs `publish-usage-receipts.yml`: native AMD64 and
+ARM64 builds each run the receipt tests (including async retry/provider HTTP
+cases) before upload to GHCR. Only successful architectures enter the release
+manifest. Pin deployments by its reported manifest digest. The image does not
+turn on receipt generation by itself; the operator must supply the TOML setting
+and durable storage described above. No `latest` tag is published.

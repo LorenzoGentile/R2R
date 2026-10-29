@@ -1,0 +1,15 @@
+# Preserve the deployed 3.6.5 runtime dependency set; replace application code
+# with the receipt-enabled maintenance fork and pin the qualified SDK adapter.
+FROM sciphiai/r2r@sha256:e7caf41aba36db5561a2579eeb3e4763c907ae4d4b241712a33e783fa381aa8a
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.source="https://github.com/LorenzoGentile/R2R" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.version="3.6.5-genie.1"
+WORKDIR /app
+COPY core /app/core
+COPY shared /app/shared
+COPY sdk /app/sdk
+COPY r2r /app/r2r
+COPY migrations /app/migrations
+RUN pip install --no-cache-dir --no-deps litellm==1.69.3 && \
+    python -c 'from core.base import AppConfig; from core.base.usage import UsageReceipt; assert "usage_receipts_directory" in AppConfig.model_fields; assert "usage_complete" in UsageReceipt.model_fields'
